@@ -1,0 +1,13 @@
+= Designing an Optaplanner Frontend in React
+
+So you have created an amazing solution for your constraint problem using OptaPlanner.
+However, your solution lack a graphical interface, and as such, you need to manually create
+or edit a file whenever the problem change (for instance, a new employee). Moreover, the
+solution is just a bunch of text that hard to reason about. Having a graphical frontend
+allows anyone to easy modify and create new constraint problems, as well as giving users
+additional insights into the solution OptaPlanner produces. With React, you can quickly
+create a graphical frontend for your OptaPlanner project.
+
+== Step 1: Establishing an API between the frontend and backend
+
+Before designing 
