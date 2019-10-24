@@ -6,8 +6,340 @@ or edit a file whenever the problem change (for instance, a new employee). Moreo
 solution is just a bunch of text that hard to reason about. Having a graphical frontend
 allows anyone to easy modify and create new constraint problems, as well as giving users
 additional insights into the solution OptaPlanner produces. With React, you can quickly
-create a graphical frontend for your OptaPlanner project.
+create a graphical frontend for your OptaPlanner project. I will use
+https://github.com/kiegroup/optaweb-employee-rostering[OptaWeb Employee Rostering],
+which has recently been refactored from GWT to React, as an example. 
 
 == Step 1: Establishing an API between the frontend and backend
 
-Before designing 
+Before designing any aspect of the frontend, you need to decide on an API. Here are the
+aspects you should consider when designing an API:
+
+* Will there be multiple users, each with their own set of data? If so, your objects
+and endpoints should incorporate a tenant id; an identifier that tells us who owns
+the data. This will make collection queries (like "get me all the employees who belong
+to tenant id 0") easier.
+
+* When an object references other objects, you should return the referenced object's id
+instead of the whole referenced object if the referenced object won't typically be used
+by a user. This is known as _Lazy Loading_, and will improve your backend performance.
+
+* Is your backend stateless or will be used outside your frontend? If so, you should
+use RESTful HTTP requests. If your backend have stateful sessions, you should use
+Web Sockets. _OptaWeb Employee Rostering_ uses HTTP requests, for an example of
+using Web Sockets, see https://github.com/kiegroup/optaweb-vehicle-routing[OptaWeb Vehicle Routing].
+
+== Step 2: Fetching data from the backend
+
+Now that you have decided on an API, it is time to put it into use in our frontend. I will assume
+you are using RESTful HTTP requests; for a web sockets example see
+https://github.com/kiegroup/optaweb-vehicle-routing/blob/master/optaweb-vehicle-routing-frontend/src/websocket/WebSocketClient.ts[OptaWeb Vehicle Routing].
+There are many different frameworks we can use for making REST requests. I recommend https://github.com/axios/axios[Axios] because:
+
+* Full TypeScript support
+* Easy error handling
+* Over five years of support
+
+First, we need to create an `axios` instance:
+
+[source,typescript]
+----
+const restClient = axios.create({
+  baseURL: '/rest' <1>
+});
+----
+<1> The base url used for all requests; any requests made using this axios instance will be prefixed with this url. Can pass '/' to use the same url
+as the frontend.
+
+Next, we need to call our backend. `axios` provide methods for each of the five request types: `get`, `post`, `put`, `delete` and `patch`.
+
+[source,typescript]
+----
+const response: AxiosResponse<Employee> = await restClient.get('/tenant/0/employee/123'); 
+const employee = response.data; // { id: 123, version: 0, name: "Robert" }
+----
+
+== Step 3: Representing backend state in the frontend
+
+Now that you can make requests to your backend, we need to represent its state in the frontend. In order to avoid making repeated calls to the backend
+and have all components in sync, we need a central store of information. For this task, we can use https://redux.js.org/[_Redux_] and 
+https://github.com/reduxjs/redux-thunk[_Redux Thunk_].
+
+
+In _Redux_, we have a _store_ that holds the global state of the frontend. The store's state is stored as a JSON object. For each field of the JSON
+object, we have the following:
+
+* _Actions_ that tells the store how to modify a field
+* _Operations_ that a user calls to dispatch actions
+* _Reducers_ that applies an action to the store
+* _Selectors_ that converts the store state into something more easy consumed by the user
+
+Let use skills as an example. You can add, remove, or update skills; these are our actions:
+
+.actions.ts
+[source,typescript]
+----
+export const addSkill: ActionFactory<Skill, AddSkillAction> = newSkill => ({
+  type: "ADD_SKILL",
+  skill: newSkill
+});
+
+export const removeSkill: ActionFactory<Skill, RemoveSkillAction> = deletedSkill => ({
+  type: "REMOVE_SKILL",
+  skill: deletedSkill
+});
+
+export const updateSkill: ActionFactory<Skill, UpdateSkillAction> = updatedSkill => ({
+  type: "UPDATE_SKILL",
+  skill: updatedSkill
+});
+----
+You can perform actions by calling the corresponding REST method; these are our operations:
+
+.operations.ts
+[source,typescript]
+----
+const restClient = axios.create({
+  baseURL: '/rest'
+});
+
+export const addSkill: ThunkCommandFactory<Skill,AddSkillAction> = skill => <1>
+  (dispatch, state) => {
+    const tenantId = skill.tenantId;
+    return restClient.post<Skill>(`/tenant/${tenantId}/skill/add`, skill).then(newSkill => {
+      dispatch(actions.addSkill(newSkill.data))
+    });
+  };
+
+export const removeSkill: ThunkCommandFactory<Skill,RemoveSkillAction> = skill =>
+  (dispatch, state) => {
+    const tenantId = skill.tenantId;
+    const skillId = skill.id;
+    return restClient.delete<boolean>(`/tenant/${tenantId}/skill/${skillId}`).then(isSuccess => {
+      if (isSuccess) {
+        dispatch(actions.removeSkill(skill));
+      }
+    });
+  };
+
+export const updateSkill: ThunkCommandFactory<Skill,UpdateSkillAction> = skill =>
+  (dispatch, state) => {
+    const tenantId = skill.tenantId;
+    return restClient.post<Skill>(`/tenant/${tenantId}/skill/update`, skill).then(updatedSkill => {
+      dispatch(actions.updateSkill(updatedSkill.data));
+    });
+  };
+----
+<1> This is where Redux Thunk come in -- the method returns a `ThunkCommand` instead of an `Action`. Redux
+normally dispatch Actions synchronously. However, when a `ThunkCommand` is dispatched, the command
+is executed with the store state and dispatch methods. This allow a `ThunkCommand` to dispatch its own
+action when an asynchronous action is completed.
+
+
+We have a function that takes the response from the REST call and apply it to the state; this is our
+reducer:
+
+.reducers.ts
+[source,typescript]
+----
+export const initialState: SkillList = { <1>
+  skillMapById: new Map<number, DomainObjectView<Skill>>() <2>
+};
+
+const skillReducer = (state = initialState, action: SkillAction): SkillList => {
+  switch (action.type) {
+    case "ADD_SKILL": {
+      return { ...state, skillMapById: mapWithElement(state.skillMapById, action.skill) }; <3>
+    }
+    case "REMOVE_SKILL": {
+      return { ...state, skillMapById: mapWithoutElement(state.skillMapById, action.skill) };
+    }
+    case "UPDATE_SKILL": {
+      return { ...state, skillMapById: mapWithUpdatedElement(state.skillMapById, action.skill) };
+    }
+    default:
+      return state;
+  }
+};
+----
+<1> The initialState is the state in the store when the application begins.
+
+<2> `DomainObjectView<T>` is a useful type alias I defined. It defines a new type
+that define the type of fields with id (example: the employee of a shift)
+to be a number. It is explained in more detail below.
+    
+<3> All data in the store is immutable, so we need to clone objects, maps and lists to modify them.
+`mapWithElement`, `mapWithoutElement` and `mapWithUpdatedElement` are helper methods
+that clone a map and adds/removes/updates an object to the map (after converting it
+to its view).
+
+Finally, we have a method that allows us to get a skill by id; this is a selector.
+
+.selectors.ts
+[source,typescript]
+----
+export const getSkillById = (state: AppState, id: number): Skill => {
+  return state.skillList.skillMapById.get(id) as Skill;
+};
+----
+
+Now that we have our reducers, operations, actions and selectors defined, it time to add them to the store:
+
+.store.ts
+[source,typescript]
+----
+export function configureStore(preloadedState?: AppState): Store<AppState> {
+
+  const restClient = axios.create({
+    baseURL: '/rest'
+  });
+
+  const middlewares = [thunk.withExtraArgument(restServiceClient), createLogger()]; <1>
+  const middlewareEnhancer = applyMiddleware(...middlewares);
+
+  const enhancers = [middlewareEnhancer];
+  const composedEnhancers = composeWithDevTools(...enhancers);
+
+  // map reducers to state slices
+  const rootReducer = combineReducers<AppState>({
+    tenantData: tenantReducer,
+    skillList: skillReducer,
+    // ...
+  });
+
+  const store = createStore(
+    rootReducer,
+    preloadedState,
+    composedEnhancers,
+  );
+
+  return store;
+}
+----
+<1> You can give React Thunk an extra argument which will be passed to all ThunkCommand created as a third parameter.
+I didn't use it in the above example to keep it simpler and easier to understand.
+
+=== What to store in the store
+
+Now that we know how to store stuff in a store, what should we store in the store? Here are the guidelines to use
+when determining what to put into your store:
+
+* When you have objects that reference other objects in the store, store the referenced object id instead of
+the referenced object, regardless if you use lazy loading or not. That way, if you were to update the referenced
+object (ex: change its name), you won't have the stale value in the objects that reference it. I created a
+type alias that converts the type automatically for me:
+
+.DomainObjectView.ts
+[source,typescript]
+----
+type DomainObjectView<T extends DomainObject> = { <1>
+  [K in keyof T]: 
+  T[K] extends DomainObject[]? number[] :
+    T[K] extends DomainObject? number :
+      T[K] extends (DomainObject | null)? number | null :
+        T[K];
+}
+----
+<1> `DomainObject` is defined to be any object with an optional `id` field, which mean any type with an optional `id` field
+will be converted to a number, but a type without an optional `id` field will not.
+
+To help automate the process, I have a function that converts from `T` to `DomainObject<T>`:
+
+ .DomainObjectUtils.ts
+[source,typescript]
+----
+function mapDomainObjectToView<T extends DomainObject>(obj: T): DomainObjectView<T> {
+  let result: any = {};
+  const objWithKeys: any = obj; // allows us to get fields via their names
+  for(const key in obj) {
+    // Case 1: an Object with an id field present
+    if (objWithKeys[key] !== null && objWithKeys[key].id !== undefined) {
+      result[key] = objWithKeys[key].id;
+    }
+    // Case 2: an Array containing an object with an id field present
+    else if (Array.isArray(objWithKeys[key]) && objWitsubtrachKeys[key].length > 0 && objWithKeys[key][0].id !== undefined) {
+      result[key] = objWithKeys[key].map((ele: DomainObject)  => ele.id);
+    }
+    // Case 3: an Object without an id field/an Array containing objects without an id field
+    else {
+      result[key] = objWithKeys[key];
+    }
+  }
+  return result as DomainObjectView<T>;
+}
+----
+
+* The content of the store *must* be immutable. Do not modify it, ever. You will encounter strange bugs if you do. For instance,
+I once forgot calling `moment.add(...)` modify the moment object instead of returning a new one. The result? All the dates
+in a different component were shifted and I couldn't find out why (until I read `moment` documentation).
+
+* Do *not* store component state in the store. The store is meant for data shared across the application; if the data is used in
+only one place, it probably does not belong in the store.
+
+== Step 4: Displaying Entities
+
+Now that we have successfully connected the frontend to the backend, we can start working on the UI. I recommend using
+https://www.patternfly.org/v4/[Patternfly], which comes with a set of professionally made
+https://www.patternfly.org/v4/documentation/react/overview/notes/[React Components] that make creating a polished UI
+extremely easy. First, let display all our skills in a table:
+
+ .SkillsPage.ts
+[source,typescript]
+----
+interface StateProps {
+  skillList: Skill[];
+}
+
+interface DispatchProps {
+  addSkill: typeof skillOperations.addSkill;
+}
+
+const mapStateToProps = (state: AppState): StateProps => ({
+  skillList: skillSelectors.getSkillList(state) <1>
+});
+
+const mapDispatchToProps: DispatchProps = {
+  addSkill: skillOperations.addSkill;
+}
+
+type Props = StateProps & DispatchProps;
+
+export const SkillsPage: React.FC<Props> = (props) => {
+  const { skillList } = props;
+  const { clickCount, setClickCount } = React.useState(0);
+
+  return (
+    <>
+      <Button onClick={() => {
+        props.addSkill({ name: "New Skill " + clickCount });
+        setClickCount(clickCount + 1);
+      }}
+      >
+        Add Skill
+      </Button>
+      <Table
+        caption="Skills"
+        cells={["Name")]}
+        rows={
+          rowsInPage.map<IRow>(skill => [skill.name])
+        }
+      >
+        <TableHeader />
+        <TableBody />
+      </Table>
+    </>
+  );
+}
+
+export default connect(mapStateToProps, mapDispatchToProps)(SkillsPage); <2>
+----
+<1> Recall that we use maps to store the skills. We used maps since that make it faster
+to get a skill by id. However, it complicates getting a list of all the skills.
+`skillSelectors.getSkillList(state)` converts that map into a list. It take in
+the entire state so it is able to replace id's with the objects they reference.
+
+<2> `connect(...)`, as its name suggests, connects a component to the store.
+The first argument is a map from the store state to the component props. The
+second argument is an object containing operations your component will dispatch;
+calling the operation via the prop will automatically dispatch its action.
+
